@@ -79,18 +79,32 @@ def setup_database():
 # --- 3. FONTES DE DADOS (APIs) ---
 
 def get_security_data(token_address):
-    """Busca dados de segurança na GoPlus Security API."""
-    if not GOPLUS_API_KEY: return None
+    """Busca dados de segurança na GoPlus Security API de forma mais robusta."""
+    if not GOPLUS_API_KEY: 
+        return None
+        
     url = f"https://api.gopluslabs.io/api/v1/token_security/{GOPLUS_CHAIN_ID}?contract_addresses={token_address}"
     headers = {'X-API-KEY': GOPLUS_API_KEY}
+    
     try:
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
-        return response.json().get('result', {}).get(token_address.lower())
+        
+        # --- LINHA CORRIGIDA ---
+        # Primeiro, pegamos o dicionário 'result' de forma segura.
+        result_dict = response.json().get('result')
+        
+        # Depois, verificamos se ele não é nulo antes de usá-lo.
+        if result_dict:
+            return result_dict.get(token_address.lower())
+        
+        # Se 'result' for nulo ou não existir, retornamos None.
+        return None
+        
     except requests.RequestException as e:
         print(f"  - Erro na API GoPlus: {e}")
         return None
-
+        
 def get_holder_count_from_helius(token_address):
     """Busca o número de holders usando a Digital Asset API da Helius."""
     if not RPC_URL:
