@@ -1,44 +1,55 @@
 # ==============================================================================
-# DATA COLLECTOR BOT - v1.2 FINAL ROBUSTO
+# DATA COLLECTOR BOT - v1.3 - MODO WEB SERVICE
 #
-# Coleta dados de memecoins recém-lançadas na rede Solana e salva em um
-# banco de dados PostgreSQL. Otimizado para resiliência e deploy no Koyeb.
+# Coleta dados e roda um micro-servidor web paralelo para passar
+# nas verificações de saúde de plataformas como o Koyeb no plano gratuito.
 # ==============================================================================
 
 import os
 import requests
 import time
 import psycopg2
-import traceback # Importado para logs de erro mais detalhados
+import traceback
 from datetime import datetime, timedelta
+from flask import Flask
+from threading import Thread
 
 # --- 1. CONFIGURAÇÕES E VARIÁVEIS DE AMBIENTE ---
 
-# Variáveis de ambiente que serão configuradas no painel do Koyeb
 DATABASE_URL = os.environ.get('DATABASE_URL')
 GOPLUS_API_KEY = os.environ.get('GOPLUS_API_KEY')
-RPC_URL = os.environ.get('RPC_URL') # Usando a variável padrão para a URL da Helius
+RPC_URL = os.environ.get('RPC_URL')
 
-# A blockchain alvo para a descoberta de novos pares
 TARGET_CHAIN = 'solana'
-# Chain ID correspondente na GoPlus Security API
 GOPLUS_CHAIN_ID = 'solana_mainnet' 
 
-# Regras de negócio
-MAX_PAIR_AGE_HOURS = 4  # Idade máxima em horas para um par ser considerado "novo"
-DEATH_LIQUIDITY_THRESHOLD_USD = 2000 # Liquidez mínima para ser considerado "vivo"
-DEATH_VOLUME_THRESHOLD_USD = 1000 # Volume mínimo em 1h para ser considerado "vivo"
+MAX_PAIR_AGE_HOURS = 4
+DEATH_LIQUIDITY_THRESHOLD_USD = 2000
+DEATH_VOLUME_THRESHOLD_USD = 1000
 
-# --- 2. BANCO DE DADOS (PostgreSQL) ---
+# --- 2. SERVIDOR WEB PARA HEALTH CHECK ---
+
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    """Endpoint simples para responder à verificação de saúde do Koyeb."""
+    return "Data collector is alive and running.", 200
+
+def run_web_server():
+    """Inicia o servidor Flask na porta fornecida pelo ambiente."""
+    # O Koyeb (e outras plataformas) fornece a porta na variável de ambiente PORT
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host='0.0.0.0', port=port)
+
+# --- 3. BANCO DE DADOS (PostgreSQL) ---
 
 def get_db_connection():
-    """Retorna uma conexão com o banco de dados PostgreSQL."""
     if not DATABASE_URL:
-        raise ValueError("DATABASE_URL não foi configurada como variável de ambiente.")
+        raise ValueError("DATABASE_URL não foi configurada.")
     return psycopg2.connect(DATABASE_URL)
 
 def setup_database():
-    """Cria as tabelas no PostgreSQL se não existirem."""
     print("🔧 Configurando o banco de dados PostgreSQL...")
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -76,64 +87,61 @@ def setup_database():
     conn.close()
     print("✅ Banco de dados pronto.")
 
-# --- 3. FONTES DE DADOS (APIs) ---
+# --- 4. FONTES DE DADOS (APIs) ---
 
 def get_security_data(token_address):
-    """Busca dados de segurança na GoPlus Security API de forma mais robusta."""
-    if not GOPLUS_API_KEY: 
-        return None
-        
+    if not GOPLUS_API_KEY: return None
     url = f"https://api.gopluslabs.io/api/v1/token_security/{GOPLUS_CHAIN_ID}?contract_addresses={token_address}"
     headers = {'X-API-KEY': GOPLUS_API_KEY}
-    
     try:
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
-        
-        # --- LINHA CORRIGIDA ---
-        # Primeiro, pegamos o dicionário 'result' de forma segura.
         result_dict = response.json().get('result')
-        
-        # Depois, verificamos se ele não é nulo antes de usá-lo.
         if result_dict:
             return result_dict.get(token_address.lower())
-        
-        # Se 'result' for nulo ou não existir, retornamos None.
         return None
-        
     except requests.RequestException as e:
         print(f"  - Erro na API GoPlus: {e}")
         return None
-        
+
 def get_holder_count_from_helius(token_address):
-    """Busca o número de holders usando a Digital Asset API da Helius."""
     if not RPC_URL:
-        print("  - URL RPC da Helius não configurada na variável RPC_URL.")
+        print("  - URL RPC da Helius não configurada.")
         return 0
-    
     try:
         headers = {'Content-Type': 'application/json'}
-        payload = {
-            "jsonrpc": "2.0", "id": "helius-data-collector",
-            "method": "getAsset", "params": {"id": token_address}
-        }
+        payload = { "jsonrpc": "2.0", "id": "helius-data-collector", "method": "getAsset", "params": {"id": token_address} }
         response = requests.post(RPC_URL, headers=headers, json=payload, timeout=15)
         response.raise_for_status()
         data = response.json()
-        holder_count = data.get('result', {}).get('ownership', {}).get('owner_count', 0)
-        return holder_count
-    except requests.RequestException as e:
+        return data.get('result', {}).get('ownership', {}).get('owner_count', 0)
+    except Exception as e:
         print(f"  - Erro na API Helius ao buscar holders: {e}")
         return 0
-    except (KeyError, TypeError) as e:
-        print(f"  - Erro ao processar resposta da Helius: {e}")
-        return 0
 
-# --- 4. LÓGICA DO BOT ---
+# --- 5. LÓGICA DO BOT ---
+
+def main_bot_logic():
+    """Função que contém o loop principal de coleta de dados."""
+    setup_database()
+    while True:
+        try:
+            discover_and_profile_new_pairs()
+            collect_and_analyze_data()
+            print(f"\n--- Ciclo completo. Próxima verificação em 15 minutos --- ({datetime.now().strftime('%H:%M:%S')})")
+            time.sleep(900)
+        except KeyboardInterrupt:
+            print("\n🛑 Bot interrompido.")
+            break
+        except Exception as e:
+            print(f"❌ Erro fatal no loop principal: {e}")
+            traceback.print_exc()
+            print("Reiniciando em 60 segundos...")
+            time.sleep(60)
 
 def discover_and_profile_new_pairs():
-    """Busca, perfila e salva novos pares no banco de dados de forma mais robusta."""
     print(f"\n🔎 Procurando novos pares na rede {TARGET_CHAIN}...")
+    # (O restante das funções discover_and_profile_new_pairs e collect_and_analyze_data permanecem exatamente iguais)
     try:
         response = requests.get(f"https://api.dexscreener.com/latest/dex/search?q=new", timeout=15)
         response.raise_for_status()
@@ -155,7 +163,6 @@ def discover_and_profile_new_pairs():
             if cursor.fetchone() is None:
                 print(f"✨ Descoberto: {pair['baseToken']['symbol']} ({pair['pairAddress'][:6]}...)")
                 
-                # Bloco de coleta e processamento de dados robusto
                 security_data = get_security_data(token_address)
                 time.sleep(1) 
                 
@@ -174,8 +181,7 @@ def discover_and_profile_new_pairs():
                 
                 cursor.execute(
                     """
-                    INSERT INTO tokens 
-                    (token_address, pair_address, chain, symbol, discovered_at, initial_holder_count, is_honeypot, buy_tax, sell_tax) 
+                    INSERT INTO tokens (token_address, pair_address, chain, symbol, discovered_at, initial_holder_count, is_honeypot, buy_tax, sell_tax) 
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (token_address, pair['pairAddress'], pair['chainId'], pair['baseToken']['symbol'], datetime.utcnow(), holder_count, is_honeypot, buy_tax, sell_tax)
@@ -190,7 +196,6 @@ def discover_and_profile_new_pairs():
             conn.close()
 
 def collect_and_analyze_data():
-    """Coleta dados para tokens ativos e verifica sua 'morte'."""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT id, pair_address, symbol FROM tokens WHERE status = 'monitoring'")
@@ -240,24 +245,16 @@ def collect_and_analyze_data():
     cursor.close()
     conn.close()
 
-# --- 5. LOOP PRINCIPAL ---
+
+# --- 6. INICIALIZAÇÃO ---
 
 if __name__ == "__main__":
     if not all([DATABASE_URL, GOPLUS_API_KEY, RPC_URL]):
         print("❌ ERRO: Verifique se as variáveis de ambiente DATABASE_URL, GOPLUS_API_KEY e RPC_URL estão configuradas.")
     else:
-        setup_database()
-        while True:
-            try:
-                discover_and_profile_new_pairs()
-                collect_and_analyze_data()
-                print(f"\n--- Ciclo completo. Próxima verificação em 15 minutos --- ({datetime.now().strftime('%H:%M:%S')})")
-                time.sleep(900)
-            except KeyboardInterrupt:
-                print("\n🛑 Bot interrompido.")
-                break
-            except Exception as e:
-                print(f"❌ Erro fatal no loop principal: {e}")
-                traceback.print_exc()
-                print("Reiniciando em 60 segundos...")
-                time.sleep(60)
+        # Inicia o servidor web em uma thread separada
+        health_check_thread = Thread(target=run_web_server, daemon=True)
+        health_check_thread.start()
+        
+        # Inicia a lógica principal do bot
+        main_bot_logic()
