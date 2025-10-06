@@ -1,8 +1,8 @@
 # ==============================================================================
-# DATA COLLECTOR BOT - v1.3 - MODO WEB SERVICE
+# DATA COLLECTOR BOT - v1.4 - COM PRÉ-TESTE DE API
 #
-# Coleta dados e roda um micro-servidor web paralelo para passar
-# nas verificações de saúde de plataformas como o Koyeb no plano gratuito.
+# Adiciona uma verificação de validade da chave da GoPlus na inicialização
+# para um diagnóstico rápido e preciso.
 # ==============================================================================
 
 import os
@@ -38,9 +38,44 @@ def health_check():
 
 def run_web_server():
     """Inicia o servidor Flask na porta fornecida pelo ambiente."""
-    # O Koyeb (e outras plataformas) fornece a porta na variável de ambiente PORT
     port = int(os.environ.get("PORT", 8000))
     app.run(host='0.0.0.0', port=port)
+
+# --- NOVA FUNÇÃO DE TESTE DE API ---
+
+def test_api_keys():
+    """Verifica se a chave da API GoPlus é válida antes de iniciar o bot."""
+    print("\n🔬 Iniciando pré-teste das chaves de API...")
+    
+    # Teste para a GoPlus Security
+    if not GOPLUS_API_KEY:
+        print("❌ ERRO: A variável de ambiente GOPLUS_API_KEY não está configurada.")
+        return False
+        
+    # Usamos um token conhecido e estável para o teste (Dogwifhat - WIF)
+    test_token_address = "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzL7EMMroA2FDb"
+    url = f"https://api.gopluslabs.io/api/v1/token_security/{GOPLUS_CHAIN_ID}?contract_addresses={test_token_address}"
+    headers = {'X-API-KEY': GOPLUS_API_KEY}
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        
+        if response.status_code == 200:
+            print("✅ Chave da GoPlus Security validada com sucesso.")
+            # Poderíamos adicionar um teste para a Helius aqui também se necessário
+            return True
+        elif response.status_code in [401, 403]:
+            print(f"❌ ERRO: A chave da GoPlus Security é INVÁLIDA ou não autorizada (Código: {response.status_code}).")
+            print("   - Verifique se a chave foi copiada corretamente e está ativa no painel da GoPlus.")
+            return False
+        else:
+            print(f"⚠️ Aviso: Recebido status inesperado da GoPlus ({response.status_code}). O bot tentará continuar.")
+            print(f"   - Resposta: {response.text[:100]}") # Mostra os primeiros 100 caracteres da resposta
+            return True # Permite que o bot continue mesmo com avisos
+            
+    except requests.RequestException as e:
+        print(f"❌ ERRO: Falha de conexão ao testar a chave da GoPlus: {e}")
+        return False
 
 # --- 3. BANCO DE DADOS (PostgreSQL) ---
 
@@ -88,33 +123,19 @@ def setup_database():
     print("✅ Banco de dados pronto.")
 
 # --- 4. FONTES DE DADOS (APIs) ---
-
-# Substitua a sua função antiga por esta versão corrigida
+# (As funções get_security_data e get_holder_count_from_helius permanecem as mesmas da versão anterior)
 
 def get_security_data(token_address):
-    """Busca dados de segurança na GoPlus Security API de forma mais robusta."""
-    if not GOPLUS_API_KEY: 
-        return None
-        
+    if not GOPLUS_API_KEY: return None
     url = f"https://api.gopluslabs.io/api/v1/token_security/{GOPLUS_CHAIN_ID}?contract_addresses={token_address}"
     headers = {'X-API-KEY': GOPLUS_API_KEY}
-    
     try:
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
-        
-        # --- LINHA CORRIGIDA ---
-        # Primeiro, pegamos o dicionário 'result' de forma segura.
         result_dict = response.json().get('result')
-        
-        # Depois, verificamos se ele não é nulo antes de usá-lo.
-        # IMPORTANTE: Removemos o .lower() para funcionar com endereços Solana.
         if result_dict:
-            return result_dict.get(token_address) # AQUI ESTÁ A CORREÇÃO
-        
-        # Se 'result' for nulo ou não existir, retornamos None.
+            return result_dict.get(token_address)
         return None
-        
     except requests.RequestException as e:
         print(f"  - Erro na API GoPlus: {e}")
         return None
@@ -135,9 +156,9 @@ def get_holder_count_from_helius(token_address):
         return 0
 
 # --- 5. LÓGICA DO BOT ---
+# (As funções main_bot_logic, discover_and_profile_new_pairs, collect_and_analyze_data permanecem as mesmas)
 
 def main_bot_logic():
-    """Função que contém o loop principal de coleta de dados."""
     setup_database()
     while True:
         try:
@@ -154,25 +175,15 @@ def main_bot_logic():
             print("Reiniciando em 60 segundos...")
             time.sleep(60)
 
-# Substitua a sua função antiga por esta versão com mais logs de diagnóstico
-
-# Substitua a sua função antiga por esta nova versão que usa a API da Geckoterminal
-
 def discover_and_profile_new_pairs():
-    """Busca novos pares usando a API da Geckoterminal, que é específica para esta tarefa."""
     print(f"\n🔎 Procurando novos pares na rede {TARGET_CHAIN} via Geckoterminal...")
-    
-    # Este endpoint da Geckoterminal é feito para listar novos pools de liquidez
-    url = f"https://api.geckoterminal.com/api/v2/networks/{TARGET_CHAIN}/new_pools"
-
     try:
-        response = requests.get(url, timeout=15)
+        response = requests.get(f"https://api.geckoterminal.com/api/v2/networks/{TARGET_CHAIN}/new_pools", timeout=15)
         response.raise_for_status()
         pools_data = response.json().get('data', [])
         
-        print(f"  - API da Geckoterminal retornou {len(pools_data)} novos pools.")
-
         if not pools_data:
+            print("  - Nenhum pool novo retornado pela Geckoterminal.")
             return
 
         conn = get_db_connection()
@@ -180,29 +191,22 @@ def discover_and_profile_new_pairs():
 
         new_discoveries = 0
         for pool in pools_data:
-            # A estrutura da resposta da Geckoterminal é um pouco diferente
             attributes = pool.get('attributes', {})
             relationships = pool.get('relationships', {})
-            
             pair_address = attributes.get('address')
-            
-            # O token address fica aninhado em 'relationships'
             base_token_data = relationships.get('base_token', {}).get('data', {})
-            token_id_string = base_token_data.get('id') # Formato: 'solana_TOKENADDRESS'
+            token_id_string = base_token_data.get('id')
             
-            if not all([pair_address, token_id_string]):
-                continue
+            if not all([pair_address, token_id_string]): continue
 
-            # Extrai o endereço do token do ID
             token_address = token_id_string.split('_')[-1]
-            symbol = attributes.get('name', 'N/A').split(' / ')[0] # Pega o símbolo do nome do par "SYMBOL / QUOTE"
+            symbol = attributes.get('name', 'N/A').split(' / ')[0]
             
             cursor.execute("SELECT id FROM tokens WHERE token_address = %s", (token_address,))
             if cursor.fetchone() is None:
                 new_discoveries += 1
                 print(f"✨ Descoberto via Geckoterminal: {symbol} ({pair_address[:6]}...)")
                 
-                # A lógica de coletar dados de segurança (GoPlus) e holders (Helius) continua a mesma
                 security_data = get_security_data(token_address)
                 time.sleep(1)
                 
@@ -290,15 +294,21 @@ def collect_and_analyze_data():
     conn.close()
 
 
-# --- 6. INICIALIZAÇÃO ---
+# --- BLOCO DE INICIALIZAÇÃO MODIFICADO ---
 
 if __name__ == "__main__":
+    # Verifica se as variáveis de ambiente essenciais existem
     if not all([DATABASE_URL, GOPLUS_API_KEY, RPC_URL]):
-        print("❌ ERRO: Verifique se as variáveis de ambiente DATABASE_URL, GOPLUS_API_KEY e RPC_URL estão configuradas.")
+        print("❌ ERRO FATAL: Verifique se as variáveis de ambiente DATABASE_URL, GOPLUS_API_KEY e RPC_URL estão configuradas.")
     else:
-        # Inicia o servidor web em uma thread separada
+        # Inicia o servidor web em uma thread separada para o health check
         health_check_thread = Thread(target=run_web_server, daemon=True)
         health_check_thread.start()
         
-        # Inicia a lógica principal do bot
-        main_bot_logic()
+        # Roda o pré-teste das chaves de API
+        if test_api_keys():
+            # Se as chaves são válidas, inicia a lógica principal do bot
+            main_bot_logic()
+        else:
+            # Se as chaves são inválidas, o bot não continua.
+            print("🔴 Bot encerrado devido a chaves de API inválidas. Verifique a configuração e reinicie o serviço.")
