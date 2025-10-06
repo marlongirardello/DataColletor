@@ -1,8 +1,7 @@
 # ==============================================================================
-# DATA COLLECTOR BOT - v2.0 FINAL E OTIMIZADO
+# DATA COLLECTOR BOT - v2.1 CORRIGIDO
 #
-# Utiliza o método getProgramAccounts para uma contagem de holders robusta
-# e garantida de funcionar com endpoints RPC gratuitos.
+# Corrige o erro NameError 'main_bot_logic' is not defined.
 # ==============================================================================
 
 import os
@@ -17,7 +16,7 @@ from threading import Thread
 # --- 1. CONFIGURAÇÕES E VARIÁVEIS DE AMBIENTE ---
 DATABASE_URL = os.environ.get('DATABASE_URL')
 GOPLUS_API_KEY = os.environ.get('GOPLUS_API_KEY')
-RPC_URL = os.environ.get('RPC_URL') # Sua URL da QuickNode
+RPC_URL = os.environ.get('RPC_URL')
 
 TARGET_CHAIN = 'solana'
 GOPLUS_CHAIN_ID = 'solana_mainnet' 
@@ -36,13 +35,7 @@ def run_web_server():
     port = int(os.environ.get("PORT", 8000))
     app.run(host='0.0.0.0', port=port)
 
-# --- FUNÇÃO DE TESTE DE API (Opcional, mas bom manter) ---
-def test_api_keys():
-    # Esta função pode ser mantida como está, pois já validou a GoPlus
-    pass 
-
 # --- 3. BANCO DE DADOS (PostgreSQL) ---
-# (As funções de banco de dados permanecem as mesmas)
 def get_db_connection():
     if not DATABASE_URL: raise ValueError("DATABASE_URL não configurada.")
     return psycopg2.connect(DATABASE_URL)
@@ -51,7 +44,6 @@ def setup_database():
     print("🔧 Configurando o banco de dados PostgreSQL...")
     conn = get_db_connection()
     cursor = conn.cursor()
-    # (Comandos CREATE TABLE permanecem os mesmos)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS tokens (id SERIAL PRIMARY KEY, token_address TEXT UNIQUE NOT NULL, pair_address TEXT, chain TEXT, symbol TEXT, discovered_at TIMESTAMPTZ, initial_holder_count INTEGER, is_honeypot BOOLEAN, buy_tax REAL, sell_tax REAL, status TEXT DEFAULT 'monitoring', death_at TIMESTAMPTZ, death_reason TEXT);
     ''')
@@ -64,9 +56,7 @@ def setup_database():
     print("✅ Banco de dados pronto.")
 
 # --- 4. FONTES DE DADOS (APIs) ---
-
 def get_security_data(token_address):
-    # (Esta função permanece a mesma)
     if not GOPLUS_API_KEY: return None
     url = f"https://api.gopluslabs.io/api/v1/token_security/{GOPLUS_CHAIN_ID}?contract_addresses={token_address}"
     headers = {'X-API-KEY': GOPLUS_API_KEY}
@@ -80,26 +70,16 @@ def get_security_data(token_address):
         print(f"  - Erro na API GoPlus: {e}")
         return None
 
-# --- NOVA FUNÇÃO DE CONTAGEM DE HOLDERS ---
 def get_holder_count(token_address):
-    """Busca o número de holders usando o método universal e otimizado getProgramAccounts."""
     if not RPC_URL:
         print("  - URL RPC não configurada.")
         return 0
-    
     try:
         headers = {'Content-Type': 'application/json'}
-        payload = {
-            "jsonrpc": "2.0", "id": 1, "method": "getProgramAccounts",
-            "params": [
-                "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
-                {"encoding": "base64", "filters": [{"dataSize": 165}, {"memcmp": {"offset": 0, "bytes": token_address}}], "withContext": False}
-            ]
-        }
+        payload = { "jsonrpc": "2.0", "id": 1, "method": "getProgramAccounts", "params": ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"encoding": "base64", "filters": [{"dataSize": 165}, {"memcmp": {"offset": 0, "bytes": token_address}}], "withContext": False}] }
         response = requests.post(RPC_URL, headers=headers, json=payload, timeout=60)
         response.raise_for_status()
         data = response.json()
-        
         if 'result' in data and isinstance(data['result'], list):
             return len(data['result'])
         else:
@@ -111,28 +91,41 @@ def get_holder_count(token_address):
 
 # --- 5. LÓGICA DO BOT ---
 
+# --- FUNÇÃO QUE ESTAVA FALTANDO ---
+def main_bot_logic():
+    """Função que contém o loop principal de coleta de dados."""
+    setup_database()
+    while True:
+        try:
+            discover_and_profile_new_pairs()
+            collect_and_analyze_data()
+            print(f"\n--- Ciclo completo. Próxima verificação em 15 minutos --- ({datetime.now().strftime('%H:%M:%S')})")
+            time.sleep(900)
+        except KeyboardInterrupt:
+            print("\n🛑 Bot interrompido.")
+            break
+        except Exception as e:
+            print(f"❌ Erro fatal no loop principal: {e}")
+            traceback.print_exc()
+            print("Reiniciando em 60 segundos...")
+            time.sleep(60)
+
 def discover_and_profile_new_pairs():
-    """Busca novos pares e os perfila usando as funções otimizadas."""
     print(f"\n🔎 Procurando novos pares na rede {TARGET_CHAIN} via Geckoterminal...")
     try:
         response = requests.get(f"https://api.geckoterminal.com/api/v2/networks/{TARGET_CHAIN}/new_pools", timeout=15)
         response.raise_for_status()
         pools_data = response.json().get('data', [])
-        
         if not pools_data:
             print("  - Nenhum pool novo retornado pela Geckoterminal.")
             return
 
         conn = get_db_connection()
         cursor = conn.cursor()
-
         for pool in pools_data:
-            attributes = pool.get('attributes', {})
-            relationships = pool.get('relationships', {})
-            pair_address = attributes.get('address')
-            base_token_data = relationships.get('base_token', {}).get('data', {})
+            attributes = pool.get('attributes', {}); relationships = pool.get('relationships', {})
+            pair_address = attributes.get('address'); base_token_data = relationships.get('base_token', {}).get('data', {})
             token_id_string = base_token_data.get('id')
-            
             if not all([pair_address, token_id_string]): continue
 
             token_address = token_id_string.split('_')[-1]
@@ -146,14 +139,11 @@ def discover_and_profile_new_pairs():
                 time.sleep(1)
                 
                 if security_data:
-                    is_honeypot = bool(int(security_data.get('is_honeypot', 0)))
-                    buy_tax = float(security_data.get('buy_tax', 0))
-                    sell_tax = float(security_data.get('sell_tax', 0))
+                    is_honeypot = bool(int(security_data.get('is_honeypot', 0))); buy_tax = float(security_data.get('buy_tax', 0)); sell_tax = float(security_data.get('sell_tax', 0))
                 else:
                     print(f"  - Aviso: Dados de segurança para {symbol} não encontrados.")
                     is_honeypot = None; buy_tax = None; sell_tax = None
 
-                # --- CHAMANDO A NOVA FUNÇÃO CORRETA ---
                 holder_count = get_holder_count(token_address)
                 print(f"  - Contagem de Holders: {holder_count}")
                 time.sleep(1)
@@ -172,7 +162,6 @@ def discover_and_profile_new_pairs():
             conn.close()
 
 def collect_and_analyze_data():
-    # (Esta função permanece a mesma)
     conn = get_db_connection(); cursor = conn.cursor()
     cursor.execute("SELECT id, pair_address, symbol FROM tokens WHERE status = 'monitoring'")
     tokens_to_monitor = cursor.fetchall()
@@ -203,9 +192,10 @@ def collect_and_analyze_data():
 # --- 6. INICIALIZAÇÃO ---
 
 if __name__ == "__main__":
-    if not all([DATABASE_URL, RPC_URL]): # Simplificado, já que a GoPlus não está funcionando para nós
+    if not all([DATABASE_URL, RPC_URL]): 
         print("❌ ERRO FATAL: Verifique se as variáveis de ambiente DATABASE_URL e RPC_URL estão configuradas.")
     else:
+        # A função de teste de API foi removida para simplificar, já que a removemos do fluxo principal
         health_check_thread = Thread(target=run_web_server, daemon=True)
         health_check_thread.start()
-        main_bot_logic()
+        main_bot_logic() # Agora esta chamada funcionará
