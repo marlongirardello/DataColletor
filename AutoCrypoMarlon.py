@@ -89,17 +89,32 @@ def setup_database():
 
 # --- 4. FONTES DE DADOS (APIs) ---
 
+# Substitua a sua função antiga por esta versão corrigida
+
 def get_security_data(token_address):
-    if not GOPLUS_API_KEY: return None
+    """Busca dados de segurança na GoPlus Security API de forma mais robusta."""
+    if not GOPLUS_API_KEY: 
+        return None
+        
     url = f"https://api.gopluslabs.io/api/v1/token_security/{GOPLUS_CHAIN_ID}?contract_addresses={token_address}"
     headers = {'X-API-KEY': GOPLUS_API_KEY}
+    
     try:
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
+        
+        # --- LINHA CORRIGIDA ---
+        # Primeiro, pegamos o dicionário 'result' de forma segura.
         result_dict = response.json().get('result')
+        
+        # Depois, verificamos se ele não é nulo antes de usá-lo.
+        # IMPORTANTE: Removemos o .lower() para funcionar com endereços Solana.
         if result_dict:
-            return result_dict.get(token_address.lower())
+            return result_dict.get(token_address) # AQUI ESTÁ A CORREÇÃO
+        
+        # Se 'result' for nulo ou não existir, retornamos None.
         return None
+        
     except requests.RequestException as e:
         print(f"  - Erro na API GoPlus: {e}")
         return None
