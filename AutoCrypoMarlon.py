@@ -1,15 +1,15 @@
 # ==============================================================================
-# DATA COLLECTOR BOT - v1.1 FINAL
+# DATA COLLECTOR BOT - v1.2 FINAL ROBUSTO
 #
 # Coleta dados de memecoins recém-lançadas na rede Solana e salva em um
-# banco de dados PostgreSQL para análise futura.
-# Pronto para deploy no Koyeb.
+# banco de dados PostgreSQL. Otimizado para resiliência e deploy no Koyeb.
 # ==============================================================================
 
 import os
 import requests
 import time
 import psycopg2
+import traceback # Importado para logs de erro mais detalhados
 from datetime import datetime, timedelta
 
 # --- 1. CONFIGURAÇÕES E VARIÁVEIS DE AMBIENTE ---
@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 # Variáveis de ambiente que serão configuradas no painel do Koyeb
 DATABASE_URL = os.environ.get('DATABASE_URL')
 GOPLUS_API_KEY = os.environ.get('GOPLUS_API_KEY')
-RPC_URL = os.environ.get('RPC_URL') # Usando a variável padrão do Koyeb para a URL da Helius
+RPC_URL = os.environ.get('RPC_URL') # Usando a variável padrão para a URL da Helius
 
 # A blockchain alvo para a descoberta de novos pares
 TARGET_CHAIN = 'solana'
@@ -118,7 +118,7 @@ def get_holder_count_from_helius(token_address):
 # --- 4. LÓGICA DO BOT ---
 
 def discover_and_profile_new_pairs():
-    """Busca, perfila e salva novos pares no banco de dados."""
+    """Busca, perfila e salva novos pares no banco de dados de forma mais robusta."""
     print(f"\n🔎 Procurando novos pares na rede {TARGET_CHAIN}...")
     try:
         response = requests.get(f"https://api.dexscreener.com/latest/dex/search?q=new", timeout=15)
@@ -141,18 +141,27 @@ def discover_and_profile_new_pairs():
             if cursor.fetchone() is None:
                 print(f"✨ Descoberto: {pair['baseToken']['symbol']} ({pair['pairAddress'][:6]}...)")
                 
+                # Bloco de coleta e processamento de dados robusto
                 security_data = get_security_data(token_address)
                 time.sleep(1) 
+                
+                if security_data:
+                    is_honeypot = bool(int(security_data.get('is_honeypot', 0)))
+                    buy_tax = float(security_data.get('buy_tax', 0))
+                    sell_tax = float(security_data.get('sell_tax', 0))
+                else:
+                    print(f"  - Aviso: Dados de segurança para {pair['baseToken']['symbol']} não encontrados. Salvando como nulo.")
+                    is_honeypot = None
+                    buy_tax = None
+                    sell_tax = None
+
                 holder_count = get_holder_count_from_helius(token_address)
                 time.sleep(1) 
                 
-                is_honeypot = bool(int(security_data.get('is_honeypot', 0))) if security_data else None
-                buy_tax = float(security_data.get('buy_tax', 0)) if security_data else None
-                sell_tax = float(security_data.get('sell_tax', 0)) if security_data else None
-
                 cursor.execute(
                     """
-                    INSERT INTO tokens (token_address, pair_address, chain, symbol, discovered_at, initial_holder_count, is_honeypot, buy_tax, sell_tax) 
+                    INSERT INTO tokens 
+                    (token_address, pair_address, chain, symbol, discovered_at, initial_holder_count, is_honeypot, buy_tax, sell_tax) 
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (token_address, pair['pairAddress'], pair['chainId'], pair['baseToken']['symbol'], datetime.utcnow(), holder_count, is_honeypot, buy_tax, sell_tax)
@@ -160,6 +169,7 @@ def discover_and_profile_new_pairs():
                 conn.commit()
     except Exception as e:
         print(f"Erro na fase de descoberta: {e}")
+        traceback.print_exc()
     finally:
         if 'conn' in locals() and not conn.closed:
             cursor.close()
@@ -234,4 +244,6 @@ if __name__ == "__main__":
                 break
             except Exception as e:
                 print(f"❌ Erro fatal no loop principal: {e}")
+                traceback.print_exc()
+                print("Reiniciando em 60 segundos...")
                 time.sleep(60)
