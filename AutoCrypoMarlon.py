@@ -141,79 +141,83 @@ def main_bot_logic():
 
 # Substitua a sua função antiga por esta versão com mais logs de diagnóstico
 
-def discover_and_profile_new_pairs():
-    """Busca, perfila e salva novos pares no banco de dados com logs de diagnóstico."""
-    print(f"\n🔎 Procurando novos pares na rede {TARGET_CHAIN}...")
-    try:
-        response = requests.get(f"https://api.dexscreener.com/latest/dex/search?q=new", timeout=15)
-        response.raise_for_status()
-        pairs = response.json().get('pairs', [])
-        
-        # --- LOG DE DIAGNÓSTICO 1 ---
-        print(f"  - API da DexScreener retornou {len(pairs)} pares antes da filtragem.")
+# Substitua a sua função antiga por esta nova versão que usa a API da Geckoterminal
 
-        if not pairs:
-            return # Se não encontrou pares, encerra a função aqui.
+def discover_and_profile_new_pairs():
+    """Busca novos pares usando a API da Geckoterminal, que é específica para esta tarefa."""
+    print(f"\n🔎 Procurando novos pares na rede {TARGET_CHAIN} via Geckoterminal...")
+    
+    # Este endpoint da Geckoterminal é feito para listar novos pools de liquidez
+    url = f"https://api.geckoterminal.com/api/v2/networks/{TARGET_CHAIN}/new_pools"
+
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        pools_data = response.json().get('data', [])
+        
+        print(f"  - API da Geckoterminal retornou {len(pools_data)} novos pools.")
+
+        if not pools_data:
+            return
 
         conn = get_db_connection()
         cursor = conn.cursor()
 
         new_discoveries = 0
-        for pair in pairs[:20]: # Vamos verificar apenas os 20 primeiros resultados por enquanto
+        for pool in pools_data:
+            # A estrutura da resposta da Geckoterminal é um pouco diferente
+            attributes = pool.get('attributes', {})
+            relationships = pool.get('relationships', {})
             
-            pair_chain = pair.get('chainId')
-            pair_symbol = pair.get('baseToken', {}).get('symbol', 'N/A')
-            pair_created_at = datetime.fromtimestamp(pair.get('pairCreatedAt', 0) / 1000)
-            age = datetime.utcnow() - pair_created_at
+            pair_address = attributes.get('address')
             
-            # --- LOG DE DIAGNÓSTICO 2 ---
-            print(f"  - Verificando: {pair_symbol} | Chain: {pair_chain} | Idade: {age}")
+            # O token address fica aninhado em 'relationships'
+            base_token_data = relationships.get('base_token', {}).get('data', {})
+            token_id_string = base_token_data.get('id') # Formato: 'solana_TOKENADDRESS'
+            
+            if not all([pair_address, token_id_string]):
+                continue
 
-            if pair_chain != TARGET_CHAIN:
-                continue # Pula se não for da chain correta
+            # Extrai o endereço do token do ID
+            token_address = token_id_string.split('_')[-1]
+            symbol = attributes.get('name', 'N/A').split(' / ')[0] # Pega o símbolo do nome do par "SYMBOL / QUOTE"
             
-            if age > timedelta(hours=MAX_PAIR_AGE_HOURS):
-                continue # Pula se for mais velho que o nosso limite
-            
-            token_address = pair.get('baseToken', {}).get('address')
-            if not token_address: continue
-
             cursor.execute("SELECT id FROM tokens WHERE token_address = %s", (token_address,))
             if cursor.fetchone() is None:
                 new_discoveries += 1
-                print(f"✨ Descoberto: {pair['baseToken']['symbol']} ({pair['pairAddress'][:6]}...)")
+                print(f"✨ Descoberto via Geckoterminal: {symbol} ({pair_address[:6]}...)")
                 
-                # ... (o resto da lógica de coleta de dados e inserção no banco continua igual) ...
+                # A lógica de coletar dados de segurança (GoPlus) e holders (Helius) continua a mesma
                 security_data = get_security_data(token_address)
-                time.sleep(1) 
+                time.sleep(1)
                 
                 if security_data:
                     is_honeypot = bool(int(security_data.get('is_honeypot', 0)))
                     buy_tax = float(security_data.get('buy_tax', 0))
                     sell_tax = float(security_data.get('sell_tax', 0))
                 else:
-                    print(f"  - Aviso: Dados de segurança para {pair['baseToken']['symbol']} não encontrados. Salvando como nulo.")
+                    print(f"  - Aviso: Dados de segurança para {symbol} não encontrados.")
                     is_honeypot = None
                     buy_tax = None
                     sell_tax = None
 
                 holder_count = get_holder_count_from_helius(token_address)
-                time.sleep(1) 
+                time.sleep(1)
                 
                 cursor.execute(
                     """
                     INSERT INTO tokens (token_address, pair_address, chain, symbol, discovered_at, initial_holder_count, is_honeypot, buy_tax, sell_tax) 
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
-                    (token_address, pair['pairAddress'], pair['chainId'], pair['baseToken']['symbol'], datetime.utcnow(), holder_count, is_honeypot, buy_tax, sell_tax)
+                    (token_address, pair_address, TARGET_CHAIN, symbol, datetime.utcnow(), holder_count, is_honeypot, buy_tax, sell_tax)
                 )
                 conn.commit()
         
         if new_discoveries == 0:
-            print("  - Nenhum par passou nos filtros de chain e idade.")
+            print("  - Nenhum par novo (ainda não registrado) encontrado neste ciclo.")
 
     except Exception as e:
-        print(f"Erro na fase de descoberta: {e}")
+        print(f"Erro na fase de descoberta via Geckoterminal: {e}")
         traceback.print_exc()
     finally:
         if 'conn' in locals() and not conn.closed:
