@@ -139,30 +139,51 @@ def main_bot_logic():
             print("Reiniciando em 60 segundos...")
             time.sleep(60)
 
+# Substitua a sua função antiga por esta versão com mais logs de diagnóstico
+
 def discover_and_profile_new_pairs():
+    """Busca, perfila e salva novos pares no banco de dados com logs de diagnóstico."""
     print(f"\n🔎 Procurando novos pares na rede {TARGET_CHAIN}...")
-    # (O restante das funções discover_and_profile_new_pairs e collect_and_analyze_data permanecem exatamente iguais)
     try:
         response = requests.get(f"https://api.dexscreener.com/latest/dex/search?q=new", timeout=15)
         response.raise_for_status()
         pairs = response.json().get('pairs', [])
         
+        # --- LOG DE DIAGNÓSTICO 1 ---
+        print(f"  - API da DexScreener retornou {len(pairs)} pares antes da filtragem.")
+
+        if not pairs:
+            return # Se não encontrou pares, encerra a função aqui.
+
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        for pair in pairs:
-            if pair.get('chainId') != TARGET_CHAIN: continue
+        new_discoveries = 0
+        for pair in pairs[:20]: # Vamos verificar apenas os 20 primeiros resultados por enquanto
             
+            pair_chain = pair.get('chainId')
+            pair_symbol = pair.get('baseToken', {}).get('symbol', 'N/A')
             pair_created_at = datetime.fromtimestamp(pair.get('pairCreatedAt', 0) / 1000)
-            if datetime.utcnow() - pair_created_at > timedelta(hours=MAX_PAIR_AGE_HOURS): continue
+            age = datetime.utcnow() - pair_created_at
+            
+            # --- LOG DE DIAGNÓSTICO 2 ---
+            print(f"  - Verificando: {pair_symbol} | Chain: {pair_chain} | Idade: {age}")
+
+            if pair_chain != TARGET_CHAIN:
+                continue # Pula se não for da chain correta
+            
+            if age > timedelta(hours=MAX_PAIR_AGE_HOURS):
+                continue # Pula se for mais velho que o nosso limite
             
             token_address = pair.get('baseToken', {}).get('address')
             if not token_address: continue
 
             cursor.execute("SELECT id FROM tokens WHERE token_address = %s", (token_address,))
             if cursor.fetchone() is None:
+                new_discoveries += 1
                 print(f"✨ Descoberto: {pair['baseToken']['symbol']} ({pair['pairAddress'][:6]}...)")
                 
+                # ... (o resto da lógica de coleta de dados e inserção no banco continua igual) ...
                 security_data = get_security_data(token_address)
                 time.sleep(1) 
                 
@@ -187,6 +208,10 @@ def discover_and_profile_new_pairs():
                     (token_address, pair['pairAddress'], pair['chainId'], pair['baseToken']['symbol'], datetime.utcnow(), holder_count, is_honeypot, buy_tax, sell_tax)
                 )
                 conn.commit()
+        
+        if new_discoveries == 0:
+            print("  - Nenhum par passou nos filtros de chain e idade.")
+
     except Exception as e:
         print(f"Erro na fase de descoberta: {e}")
         traceback.print_exc()
